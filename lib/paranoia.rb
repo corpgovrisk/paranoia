@@ -138,14 +138,13 @@ module Paranoia
 
     destroyed_associations.each do |association|
       association_data = send(association.name)
-
       unless association_data.nil?
         if association_data.paranoid?
           if association.collection?
             association_data.only_deleted.select{ |record| restore_condition.call(record, paranoia_column_val) }
-                            .each { |record| record.restore(:recursive => true) }
+                            .each { |record| record.restore(:recursive => true, :restore_all => false) }
           else
-            association_data.restore(:recursive => true) if restore_condition.call(association_data, paranoia_column_val)
+            association_data.restore(:recursive => true, :restore_all => false) if restore_condition.call(association_data, paranoia_column_val)
           end
         end
       end
