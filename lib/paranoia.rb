@@ -86,11 +86,16 @@ module Paranoia
         # Fixes a bug where the build would error because attributes were frozen.
         # This only happened on Rails versions earlier than 4.1.
         noop_if_frozen = ActiveRecord.version < Gem::Version.new("4.1")
+        paranoia_column_val = self.send paranoia_column
         if (noop_if_frozen && !@attributes.frozen?) || !noop_if_frozen
           write_attribute paranoia_column, paranoia_sentinel_value
           update_column paranoia_column, paranoia_sentinel_value
         end
-        restore_associated_records if opts[:recursive]
+        if opts[:recursive]
+          restore_associated_records(paranoia_column_val) if opts.has_key?(:restore_all) && opts[:restore_all].eql?(false)
+        else
+          restore_associated_records
+        end
       end
     end
 
@@ -123,7 +128,10 @@ module Paranoia
 
   # restore associated records that have been soft deleted when
   # we called #destroy
-  def restore_associated_records
+  def restore_associated_records(paranoia_column_val = nil)
+    # Time offset within 2 sec will be restored
+    restore_condition = lambda {|record, paranoia_column_val| paranoia_column_val ? ((record.deleted_at - paranoia_column_val).abs <= 2) : true}
+
     destroyed_associations = self.class.reflect_on_all_associations.select do |association|
       association.options[:dependent] == :destroy
     end
@@ -134,9 +142,10 @@ module Paranoia
       unless association_data.nil?
         if association_data.paranoid?
           if association.collection?
-            association_data.only_deleted.each { |record| record.restore(:recursive => true) }
+            association_data.only_deleted.select{ |record| restore_condition.call(record, paranoia_column_val) }
+                            .each { |record| record.restore(:recursive => true) }
           else
-            association_data.restore(:recursive => true)
+            association_data.restore(:recursive => true) if restore_condition.call(association_data, paranoia_column_val)
           end
         end
       end
