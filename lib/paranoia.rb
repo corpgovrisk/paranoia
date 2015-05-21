@@ -129,8 +129,8 @@ module Paranoia
   # restore associated records that have been soft deleted when
   # we called #destroy
   def restore_associated_records(paranoia_column_val = nil)
-    # Time offset within 2 sec will be restored
-    restore_condition = lambda {|record, paranoia_column_val| paranoia_column_val ? ((record.deleted_at - paranoia_column_val).abs <= 2) : true}
+    # Time offset within 10 sec will be restored
+    restore_condition = lambda {|record, paranoia_column_val| paranoia_column_val ? ((record.deleted_at - paranoia_column_val).abs <= 10) : true}
 
     destroyed_associations = self.class.reflect_on_all_associations.select do |association|
       association.options[:dependent] == :destroy
