@@ -89,7 +89,7 @@ module Paranoia
         paranoia_column_val = self.send paranoia_column
         if (noop_if_frozen && !@attributes.frozen?) || !noop_if_frozen
           write_attribute paranoia_column, paranoia_sentinel_value
-          update_column paranoia_column, paranoia_sentinel_value
+          update_attribute paranoia_column, paranoia_sentinel_value
         end
         if opts[:recursive]
           restore_associated_records(paranoia_column_val) if opts.has_key?(:restore_all) && opts[:restore_all].eql?(false)
