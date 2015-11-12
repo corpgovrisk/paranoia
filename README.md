@@ -2,11 +2,15 @@
 
 Paranoia is a re-implementation of [acts\_as\_paranoid](http://github.com/technoweenie/acts_as_paranoid) for Rails 3 and Rails 4, using much, much, much less code.
 
-You would use either plugin / gem if you wished that when you called `destroy` on an Active Record object that it didn't actually destroy it, but just *hide* the record. Paranoia does this by setting a `deleted_at` field to the current time when you `destroy` a record, and hides it by scoping all queries on your model to only include records which do not have a `deleted_at` field.
+When your app is using Paranoia, calling `destroy` on an ActiveRecord object doesn't actually destroy the database record, but just *hides* it. Paranoia does this by setting a `deleted_at` field to the current time when you `destroy` a record, and hides it by scoping all queries on your model to only include records which do not have a `deleted_at` field.
 
-If you wish to actually destroy an object you may call `really_destroy!`. **WARNING**: This will also *really destroy* all `dependent: destroy` records, so please aim this method away from face when using.
+If you wish to actually destroy an object you may call `really_destroy!`. **WARNING**: This will also *really destroy* all `dependent: :destroy` records, so please aim this method away from face when using.
 
 If a record has `has_many` associations defined AND those associations have `dependent: :destroy` set on them, then they will also be soft-deleted if `acts_as_paranoid` is set,  otherwise the normal destroy will be called.
+
+## Getting Started Video
+Setup and basic usage of the paranoia gem
+[GoRails #41](https://gorails.com/episodes/soft-delete-with-paranoia)
 
 ## Installation & Usage
 
@@ -25,7 +29,7 @@ gem "paranoia", "~> 2.0"
 Of course you can install this from GitHub as well:
 
 ``` ruby
-gem "paranoia", :github => "radar/paranoia", :branch => "master"
+gem "paranoia", :github => "radar/paranoia", :branch => "rails3"
 # or
 gem "paranoia", :github => "radar/paranoia", :branch => "rails4"
 ```
@@ -90,22 +94,6 @@ If you really want it gone *gone*, call `really_destroy!`:
 # => client
 ```
 
-If you want a method to be called on destroy, simply provide a `before_destroy` callback:
-
-``` ruby
-class Client < ActiveRecord::Base
-  acts_as_paranoid
-
-  before_destroy :some_method
-
-  def some_method
-    # do stuff
-  end
-
-  # ...
-end
-```
-
 If you want to use a column other than `deleted_at`, you can pass it as an option:
 
 ``` ruby
@@ -124,6 +112,16 @@ def product
 end
 ```
 
+If you want to include associated soft-deleted objects, you can (un)scope the association:
+
+``` ruby
+class Person < ActiveRecord::Base
+  belongs_to :group, -> { with_deleted }
+end
+
+Person.includes(:group).all
+```
+
 If you want to find all records, even those which are deleted:
 
 ``` ruby
@@ -139,13 +137,17 @@ Client.only_deleted
 If you want to check if a record is soft-deleted:
 
 ``` ruby
-client.destroyed?
+client.paranoia_destroyed?
+# or
+client.deleted?
 ```
 
 If you want to restore a record:
 
 ``` ruby
 Client.restore(id)
+# or
+client.restore
 ```
 
 If you want to restore a whole bunch of records:
@@ -158,15 +160,73 @@ If you want to restore a record and their dependently destroyed associated recor
 
 ``` ruby
 Client.restore(id, :recursive => true)
-```
-
-If you want callbacks to trigger before a restore:
-
-``` ruby
-before_restore :callback_name_goes_here
+# or
+client.restore(:recursive => true)
 ```
 
 For more information, please look at the tests.
+
+#### About indexes:
+
+Beware that you should adapt all your indexes for them to work as fast as previously.
+For example,
+
+``` ruby
+add_index :clients, :group_id
+add_index :clients, [:group_id, :other_id]
+```
+
+should be replaced with
+
+``` ruby
+add_index :clients, :group_id, where: "deleted_at IS NULL"
+add_index :clients, [:group_id, :other_id], where: "deleted_at IS NULL"
+```
+
+Of course, this is not necessary for the indexes you always use in association with `with_deleted` or `only_deleted`.
+
+##### Unique Indexes
+
+Becuse NULL != NULL in standard SQL, we can not simply create a unique index
+on the deleted_at column and expect it to enforce that there only be one record
+with a certain combination of values.
+
+If your database supports them, good alternatives include partial indexes
+(above) and indexes on computed columns. E.g.
+
+``` ruby
+add_index :clients, [:group_id, 'COALESCE(deleted_at, false)'], unique: true
+```
+
+If not, an alternative is to create a separate column which is maintained
+alongside deleted_at for the sake of enforcing uniqueness. To that end,
+paranoia makes use of two method to make its destroy and restore actions:
+paranoia_restore_attributes and paranoia_destroy_attributes.
+
+``` ruby
+add_column :clients, :active, :boolean
+add_index :clients, [:group_id, :active], unique: true
+
+class Client < ActiveRecord::Base
+  # optionally have paranoia make use of your unique column, so that
+  # your lookups will benefit from the unique index
+  acts_as_paranoid column: :active, sentinel_value: true
+
+  def paranoia_restore_attributes
+    {
+      deleted_at: nil,
+      active: true
+    }
+  end
+
+  def paranoia_destroy_attributes
+    {
+      deleted_at: current_time_from_proper_timezone,
+      active: nil
+    }
+  end
+end
+```
 
 ## Acts As Paranoid Migration
 
@@ -182,26 +242,23 @@ You can replace the older `acts_as_paranoid` methods as follows:
 The `recover` method in `acts_as_paranoid` runs `update` callbacks.  Paranoia's
 `restore` method does not do this.
 
-## Support for Unique Keys with Null Values
+## Callbacks
 
-Most databases ignore null columns when it comes to resolving unique index
-constraints.  This means unique constraints that involve nullable columns may be
-problematic. Instead of using `NULL` to represent a not-deleted row, you can pick
-a value that you want paranoia to mean not deleted. Note that you can/should
-now apply a `NOT NULL` constraint to your `deleted_at` column.
+Paranoia provides few callbacks. It triggers `destroy` callback when the record is marked as deleted and `real_destroy` when the record is completely removed from database. It also calls `restore` callback when record is restored via paranoia
 
-Per model:
+For example if you want to index you records in some search engine you can do like this:
 
 ```ruby
-# pick some value
-acts_as_paranoid sentinel_value: DateTime.new(0)
+class Product < ActiveRecord::Base
+  acts_as_paranoid
+
+  after_destroy      :update_document_in_search_engine
+  after_restore      :update_document_in_search_engine
+  after_real_destroy :remove_document_from_search_engine
+end
 ```
 
-or globally in a rails initializer, e.g. `config/initializer/paranoia.rb`
-
-```ruby
-Paranoia.default_sentinel_value = DateTime.new(0)
-```
+You can use these events just like regular Rails callbacks with before, after and around hooks.
 
 ## License
 

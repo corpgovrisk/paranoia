@@ -1,13 +1,10 @@
+require 'bundler/setup'
 require 'active_record'
+require 'minitest/autorun'
+require 'paranoia'
 
-test_framework = if ActiveRecord::VERSION::STRING >= "4.1"
-  require 'minitest/autorun'
-  MiniTest::Test
-else
-  require 'test/unit'
-  Test::Unit::TestCase
-end
-require File.expand_path(File.dirname(__FILE__) + "/../lib/paranoia")
+test_framework = defined?(MiniTest::Test) ? MiniTest::Test : MiniTest::Unit::TestCase
+ActiveRecord::Base.raise_in_transactional_callbacks = true if ActiveRecord::VERSION::STRING >= '4.2'
 
 def connect!
   ActiveRecord::Base.establish_connection :adapter => 'sqlite3', database: ':memory:'
@@ -15,23 +12,38 @@ end
 
 def setup!
   connect!
-  ActiveRecord::Base.connection.execute 'CREATE TABLE parent_models (id INTEGER NOT NULL PRIMARY KEY, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE paranoid_models (id INTEGER NOT NULL PRIMARY KEY, parent_model_id INTEGER, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE paranoid_model_with_belongs (id INTEGER NOT NULL PRIMARY KEY, parent_model_id INTEGER, deleted_at DATETIME, paranoid_model_with_has_one_id INTEGER)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE paranoid_model_with_anthor_class_name_belongs (id INTEGER NOT NULL PRIMARY KEY, parent_model_id INTEGER, deleted_at DATETIME, paranoid_model_with_has_one_id INTEGER)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE paranoid_model_with_foreign_key_belongs (id INTEGER NOT NULL PRIMARY KEY, parent_model_id INTEGER, deleted_at DATETIME, has_one_foreign_key_id INTEGER)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE featureful_models (id INTEGER NOT NULL PRIMARY KEY, deleted_at DATETIME, name VARCHAR(32))'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE plain_models (id INTEGER NOT NULL PRIMARY KEY, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE callback_models (id INTEGER NOT NULL PRIMARY KEY, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE fail_callback_models (id INTEGER NOT NULL PRIMARY KEY, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE related_models (id INTEGER NOT NULL PRIMARY KEY, parent_model_id INTEGER NOT NULL, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE asplode_models (id INTEGER NOT NULL PRIMARY KEY, parent_model_id INTEGER, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE employers (id INTEGER NOT NULL PRIMARY KEY, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE employees (id INTEGER NOT NULL PRIMARY KEY, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE jobs (id INTEGER NOT NULL PRIMARY KEY, employer_id INTEGER NOT NULL, employee_id INTEGER NOT NULL, deleted_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE custom_column_models (id INTEGER NOT NULL PRIMARY KEY, destroyed_at DATETIME)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE custom_sentinel_models (id INTEGER NOT NULL PRIMARY KEY, deleted_at DATETIME NOT NULL)'
-  ActiveRecord::Base.connection.execute 'CREATE TABLE non_paranoid_models (id INTEGER NOT NULL PRIMARY KEY, parent_model_id INTEGER)'
+  {
+    'parent_model_with_counter_cache_columns' => 'related_models_count INTEGER DEFAULT 0',
+    'parent_models' => 'deleted_at DATETIME',
+    'paranoid_models' => 'parent_model_id INTEGER, deleted_at DATETIME',
+    'paranoid_model_with_belongs' => 'parent_model_id INTEGER, deleted_at DATETIME, paranoid_model_with_has_one_id INTEGER',
+    'paranoid_model_with_build_belongs' => 'parent_model_id INTEGER, deleted_at DATETIME, paranoid_model_with_has_one_and_build_id INTEGER, name VARCHAR(32)',
+    'paranoid_model_with_anthor_class_name_belongs' => 'parent_model_id INTEGER, deleted_at DATETIME, paranoid_model_with_has_one_id INTEGER',
+    'paranoid_model_with_foreign_key_belongs' => 'parent_model_id INTEGER, deleted_at DATETIME, has_one_foreign_key_id INTEGER',
+    'paranoid_model_with_timestamps' => 'parent_model_id INTEGER, created_at DATETIME, updated_at DATETIME, deleted_at DATETIME',
+    'not_paranoid_model_with_belongs' => 'parent_model_id INTEGER, paranoid_model_with_has_one_id INTEGER',
+    'paranoid_model_with_has_one_and_builds' => 'parent_model_id INTEGER, color VARCHAR(32), deleted_at DATETIME, has_one_foreign_key_id INTEGER',
+    'featureful_models' => 'deleted_at DATETIME, name VARCHAR(32)',
+    'plain_models' => 'deleted_at DATETIME',
+    'callback_models' => 'deleted_at DATETIME',
+    'fail_callback_models' => 'deleted_at DATETIME',
+    'related_models' => 'parent_model_id INTEGER, parent_model_with_counter_cache_column_id INTEGER, deleted_at DATETIME',
+    'asplode_models' => 'parent_model_id INTEGER, deleted_at DATETIME',
+    'employers' => 'name VARCHAR(32), deleted_at DATETIME',
+    'employees' => 'deleted_at DATETIME',
+    'jobs' => 'employer_id INTEGER NOT NULL, employee_id INTEGER NOT NULL, deleted_at DATETIME',
+    'custom_column_models' => 'destroyed_at DATETIME',
+    'custom_sentinel_models' => 'deleted_at DATETIME NOT NULL',
+    'non_paranoid_models' => 'parent_model_id INTEGER',
+    'polymorphic_models' => 'parent_id INTEGER, parent_type STRING, deleted_at DATETIME',
+    'namespaced_paranoid_has_ones' => 'deleted_at DATETIME, paranoid_belongs_tos_id INTEGER',
+    'namespaced_paranoid_belongs_tos' => 'deleted_at DATETIME, paranoid_has_one_id INTEGER',
+    'unparanoid_unique_models' => 'name VARCHAR(32), paranoid_with_unparanoids_id INTEGER',
+    'active_column_models' => 'deleted_at DATETIME, active BOOLEAN',
+    'active_column_model_with_uniqueness_validations' => 'name VARCHAR(32), deleted_at DATETIME, active BOOLEAN'
+  }.each do |table_name, columns_as_sql_string|
+    ActiveRecord::Base.connection.execute "CREATE TABLE #{table_name} (id INTEGER NOT NULL PRIMARY KEY, #{columns_as_sql_string})"
+  end
 end
 
 class WithDifferentConnection < ActiveRecord::Base
@@ -117,6 +129,22 @@ class ParanoiaTest < test_framework
     assert_equal nil, model.instance_variable_get(:@validate_called)
     assert_equal nil, model.instance_variable_get(:@destroy_callback_called)
     assert_equal nil, model.instance_variable_get(:@after_destroy_callback_called)
+    assert_equal nil, model.instance_variable_get(:@after_commit_callback_called)
+  end
+
+  def test_delete_in_transaction_behavior_for_plain_models_callbacks
+    model = CallbackModel.new
+    model.save
+    model.remove_called_variables     # clear called callback flags
+    CallbackModel.transaction do
+      model.delete
+    end
+
+    assert_equal nil, model.instance_variable_get(:@update_callback_called)
+    assert_equal nil, model.instance_variable_get(:@save_callback_called)
+    assert_equal nil, model.instance_variable_get(:@validate_called)
+    assert_equal nil, model.instance_variable_get(:@destroy_callback_called)
+    assert_equal nil, model.instance_variable_get(:@after_destroy_callback_called)
     assert model.instance_variable_get(:@after_commit_callback_called)
   end
 
@@ -131,6 +159,13 @@ class ParanoiaTest < test_framework
 
     assert_equal 0, model.class.count
     assert_equal 1, model.class.unscoped.count
+  end
+
+  def test_update_columns_on_paranoia_destroyed
+    record = ParentModel.create
+    record.destroy
+
+    assert record.update_columns deleted_at: Time.now
   end
 
   def test_scoping_behavior_for_paranoid_models
@@ -157,7 +192,7 @@ class ParanoiaTest < test_framework
     model.destroy
 
     assert_equal false, model.destroyed_at.nil?
-    assert model.destroyed?
+    assert model.paranoia_destroyed?
 
     assert_equal 0, model.class.count
     assert_equal 1, model.class.unscoped.count
@@ -169,6 +204,38 @@ class ParanoiaTest < test_framework
     assert_equal nil, ParanoidModel.paranoia_sentinel_value
   end
 
+  def test_active_column_model
+    model = ActiveColumnModel.new
+    assert_equal 0, model.class.count
+    model.save!
+    assert_nil model.deleted_at
+    assert_equal true, model.active
+    assert_equal 1, model.class.count
+    model.destroy
+
+    assert_equal false, model.deleted_at.nil?
+    assert_nil model.active
+    assert model.paranoia_destroyed?
+
+    assert_equal 0, model.class.count
+    assert_equal 1, model.class.unscoped.count
+    assert_equal 1, model.class.only_deleted.count
+    assert_equal 1, model.class.deleted.count
+  end
+
+  def test_active_column_model_with_uniqueness_validation_only_checks_non_deleted_records
+    a = ActiveColumnModelWithUniquenessValidation.create!(name: "A")
+    a.destroy
+    b = ActiveColumnModelWithUniquenessValidation.new(name: "A")
+    assert b.valid?
+  end
+
+  def test_active_column_model_with_uniqueness_validation_still_works_on_non_deleted_records
+    a = ActiveColumnModelWithUniquenessValidation.create!(name: "A")
+    b = ActiveColumnModelWithUniquenessValidation.new(name: "A")
+    refute b.valid?
+  end
+
   def test_sentinel_value_for_custom_sentinel_models
     model = CustomSentinelModel.new
     assert_equal 0, model.class.count
@@ -178,7 +245,7 @@ class ParanoiaTest < test_framework
     model.destroy
 
     assert DateTime.new(0) != model.deleted_at
-    assert model.destroyed?
+    assert model.paranoia_destroyed?
 
     assert_equal 0, model.class.count
     assert_equal 1, model.class.unscoped.count
@@ -206,6 +273,11 @@ class ParanoiaTest < test_framework
 
     assert_equal 0, model.class.count
     assert_equal 1, model.class.unscoped.count
+  end
+
+  def test_destroy_behavior_for_has_one_with_build_and_validation_error
+    model = ParanoidModelWithHasOneAndBuild.create
+    model.destroy
   end
 
   # Regression test for #24
@@ -281,19 +353,61 @@ class ParanoiaTest < test_framework
     assert model.instance_variable_get(:@destroy_callback_called)
   end
 
+  def test_destroy_on_readonly_record
+    # Just to demonstrate the AR behaviour
+    model = NonParanoidModel.create!
+    model.readonly!
+    assert_raises ActiveRecord::ReadOnlyRecord do
+      model.destroy
+    end
+
+    # Mirrors behaviour above
+    model = ParanoidModel.create!
+    model.readonly!
+    assert_raises ActiveRecord::ReadOnlyRecord do
+      model.destroy
+    end
+  end
+
+  def test_destroy_on_really_destroyed_record
+    model = ParanoidModel.create!
+    model.really_destroy!
+    assert model.really_destroyed?
+    assert model.paranoia_destroyed?
+    model.destroy
+    assert model.really_destroyed?
+    assert model.paranoia_destroyed?
+  end
+
+  def test_destroy_on_unsaved_record
+    # Just to demonstrate the AR behaviour
+    model = NonParanoidModel.new
+    model.destroy!
+    assert model.really_destroyed?
+    model.destroy!
+    assert model.really_destroyed?
+
+    # Mirrors behaviour above
+    model = ParanoidModel.new
+    model.destroy!
+    assert model.paranoia_destroyed?
+    model.destroy!
+    assert model.paranoia_destroyed?
+  end
+
   def test_restore
     model = ParanoidModel.new
     model.save
     id = model.id
     model.destroy
 
-    assert model.destroyed?
+    assert model.paranoia_destroyed?
 
     model = ParanoidModel.only_deleted.find(id)
     model.restore!
     model.reload
 
-    assert_equal false, model.destroyed?
+    assert_equal false, model.paranoia_destroyed?
   end
 
   def test_restore_on_object_return_self
@@ -309,6 +423,16 @@ class ParanoiaTest < test_framework
     model.save
     model.destroy
     model.destroy
+
+    assert_equal 1, ParanoidModel.unscoped.where(id: model.id).count
+  end
+
+  # Regression test for #92
+  def test_destroy_bang_twice
+    model = ParanoidModel.new
+    model.save!
+    model.destroy!
+    model.destroy!
 
     assert_equal 1, ParanoidModel.unscoped.where(id: model.id).count
   end
@@ -333,7 +457,7 @@ class ParanoiaTest < test_framework
     id = model.id
     model.destroy
 
-    assert model.destroyed?
+    assert model.paranoia_destroyed?
 
     model = CallbackModel.only_deleted.find(id)
     model.restore!
@@ -351,9 +475,15 @@ class ParanoiaTest < test_framework
 
   def test_real_destroy_dependent_destroy
     parent = ParentModel.create
-    child = parent.very_related_models.create
+    child1 = parent.very_related_models.create
+    child2 = parent.non_paranoid_models.create
+    child3 = parent.create_non_paranoid_model
+
     parent.really_destroy!
-    refute RelatedModel.unscoped.exists?(child.id)
+
+    refute RelatedModel.unscoped.exists?(child1.id)
+    refute NonParanoidModel.unscoped.exists?(child2.id)
+    refute NonParanoidModel.unscoped.exists?(child3.id)
   end
 
   def test_real_destroy_dependent_destroy_after_normal_destroy
@@ -375,19 +505,18 @@ class ParanoiaTest < test_framework
     assert RelatedModel.unscoped.exists?(child_2.id)
   end
 
-  if ActiveRecord::VERSION::STRING < "4.1"
-    def test_real_destroy
-      model = ParanoidModel.new
-      model.save
-      model.destroy!
-      refute ParanoidModel.unscoped.exists?(model.id)
-    end
+  def test_really_destroy_behavior_for_callbacks
+    model = CallbackModel.new
+    model.save
+    model.really_destroy!
+
+    assert model.instance_variable_get(:@real_destroy_callback_called)
   end
 
-  def test_real_delete
+  def test_really_delete
     model = ParanoidModel.new
     model.save
-    model.delete!
+    model.really_delete
 
     refute ParanoidModel.unscoped.exists?(model.id)
   end
@@ -414,9 +543,9 @@ class ParanoiaTest < test_framework
     b.reload
     c.reload
 
-    refute a.destroyed?
-    assert b.destroyed?
-    refute c.destroyed?
+    refute a.paranoia_destroyed?
+    assert b.paranoia_destroyed?
+    refute c.paranoia_destroyed?
   end
 
   def test_restore_with_associations
@@ -454,9 +583,12 @@ class ParanoiaTest < test_framework
     belongsTo = ParanoidModelWithBelong.create
     anthorClassName = ParanoidModelWithAnthorClassNameBelong.create
     foreignKey = ParanoidModelWithForeignKeyBelong.create
+    notParanoidModel = NotParanoidModelWithBelong.create
+
     hasOne.paranoid_model_with_belong = belongsTo
     hasOne.class_name_belong = anthorClassName
     hasOne.paranoid_model_with_foreign_key_belong = foreignKey
+    hasOne.not_paranoid_model_with_belong = notParanoidModel
     hasOne.save!
 
     hasOne.destroy
@@ -469,6 +601,7 @@ class ParanoiaTest < test_framework
 
     assert_equal true, hasOne.reload.deleted_at.nil?
     assert_equal true, belongsTo.reload.deleted_at.nil?, "#{belongsTo.deleted_at}"
+    assert_equal true, notParanoidModel.destroyed?
     assert ParanoidModelWithBelong.with_deleted.reload.count != 0, "There should be a record"
     assert ParanoidModelWithAnthorClassNameBelong.with_deleted.reload.count != 0, "There should be an other record"
     assert ParanoidModelWithForeignKeyBelong.with_deleted.reload.count != 0, "There should be a foreign_key record"
@@ -480,9 +613,12 @@ class ParanoiaTest < test_framework
     belongsTo = ParanoidModelWithBelong.create
     anthorClassName = ParanoidModelWithAnthorClassNameBelong.create
     foreignKey = ParanoidModelWithForeignKeyBelong.create
+    notParanoidModel = NotParanoidModelWithBelong.create
+
     hasOne.paranoid_model_with_belong = belongsTo
     hasOne.class_name_belong = anthorClassName
     hasOne.paranoid_model_with_foreign_key_belong = foreignKey
+    hasOne.not_paranoid_model_with_belong = notParanoidModel
     hasOne.save!
 
     hasOne.destroy
@@ -496,6 +632,7 @@ class ParanoiaTest < test_framework
 
     assert_equal true, hasOne.reload.deleted_at.nil?
     assert_equal true, belongsTo.reload.deleted_at.nil?, "#{belongsTo.deleted_at}"
+    assert_equal true, notParanoidModel.destroyed?
     assert ParanoidModelWithBelong.with_deleted.reload.count != 0, "There should be a record"
     assert ParanoidModelWithAnthorClassNameBelong.with_deleted.reload.count != 0, "There should be an other record"
     assert ParanoidModelWithForeignKeyBelong.with_deleted.reload.count != 0, "There should be a foreign_key record"
@@ -507,9 +644,12 @@ class ParanoiaTest < test_framework
     belongsTo = ParanoidModelWithBelong.create
     anthorClassName = ParanoidModelWithAnthorClassNameBelong.create
     foreignKey = ParanoidModelWithForeignKeyBelong.create
+    notParanoidModel = NotParanoidModelWithBelong.create
+
     hasOne.paranoid_model_with_belong = belongsTo
     hasOne.class_name_belong = anthorClassName
     hasOne.paranoid_model_with_foreign_key_belong = foreignKey
+    hasOne.not_paranoid_model_with_belong = notParanoidModel
     hasOne.save!
 
     hasOne.destroy
@@ -522,6 +662,7 @@ class ParanoiaTest < test_framework
 
     assert_equal true, hasOne.reload.deleted_at.nil?
     assert_equal true, belongsTo.reload.deleted_at.nil?, "#{belongsTo.deleted_at}"
+    assert_equal true, notParanoidModel.destroyed?
     assert ParanoidModelWithBelong.with_deleted.reload.count != 0, "There should be a record"
     assert ParanoidModelWithAnthorClassNameBelong.with_deleted.reload.count != 0, "There should be an other record"
     assert ParanoidModelWithForeignKeyBelong.with_deleted.reload.count != 0, "There should be a foreign_key record"
@@ -535,7 +676,20 @@ class ParanoiaTest < test_framework
 
     # Does it raise NoMethodException on restore of nil
     hasOne.restore(:recursive => true)
-    
+
+    assert hasOne.reload.deleted_at.nil?
+  end
+
+  def test_restore_with_module_scoped_has_one_association
+    # setup and destroy test object
+    hasOne = Namespaced::ParanoidHasOne.create
+    hasOne.destroy
+    assert_equal false, hasOne.reload.deleted_at.nil?
+
+    # Does it raise "uninitialized constant ParanoidBelongsTo"
+    # on restore of ParanoidHasOne?
+    hasOne.restore(:recursive => true)
+
     assert hasOne.reload.deleted_at.nil?
   end
 
@@ -549,7 +703,7 @@ class ParanoiaTest < test_framework
 
     hasOnes.each(&:destroy)
 
-    ParanoidModelWithHasOne.restore(hasOnes[1], :recursive => true)
+    ParanoidModelWithHasOne.restore(hasOnes[1].id, :recursive => true)
     hasOnes.each(&:reload)
     belongsTos.each(&:reload)
 
@@ -564,14 +718,14 @@ class ParanoiaTest < test_framework
   def test_has_one_really_destroy_with_nil
     model = ParanoidModelWithHasOne.create
     model.really_destroy!
-    
+
     refute ParanoidModelWithBelong.unscoped.exists?(model.id)
   end
-  
+
   def test_has_one_really_destroy_with_record
     model = ParanoidModelWithHasOne.create { |record| record.build_paranoid_model_with_belong }
     model.really_destroy!
-    
+
     refute ParanoidModelWithBelong.unscoped.exists?(model.id)
   end
 
@@ -591,13 +745,41 @@ class ParanoiaTest < test_framework
     # essentially, we're just ensuring that this doesn't crash
   end
 
+  def test_validates_uniqueness_only_checks_non_deleted_records
+    a = Employer.create!(name: "A")
+    a.destroy
+    b = Employer.new(name: "A")
+    assert b.valid?
+  end
+
+  def test_validates_uniqueness_still_works_on_non_deleted_records
+    a = Employer.create!(name: "A")
+    b = Employer.new(name: "A")
+    refute b.valid?
+  end
+
+  def test_updated_at_modification_on_restore
+    parent1 = ParentModel.create
+    pt1 = ParanoidModelWithTimestamp.create(:parent_model => parent1)
+    ParanoidModelWithTimestamp.record_timestamps = false
+    pt1.update_columns(created_at: 20.years.ago, updated_at: 10.years.ago, deleted_at: 10.years.ago) 
+    ParanoidModelWithTimestamp.record_timestamps = true
+    assert pt1.updated_at < 10.minutes.ago
+    refute pt1.deleted_at.nil?
+    pt1.restore!
+    assert pt1.deleted_at.nil?
+    assert pt1.updated_at > 10.minutes.ago
+  end
+
   def test_i_am_the_destroyer
-    output = capture(:stdout) { ParanoidModel.I_AM_THE_DESTROYER! }
-    assert_equal %Q{
+    expected = %Q{
       Sharon: "There should be a method called I_AM_THE_DESTROYER!"
       Ryan:   "What should this method do?"
       Sharon: "It should fix all the spelling errors on the page!"
-}, output
+}
+    assert_output expected do
+      ParanoidModel.I_AM_THE_DESTROYER!
+    end
   end
 
   def test_destroy_fails_if_callback_raises_exception
@@ -654,6 +836,91 @@ class ParanoiaTest < test_framework
     setup!
   end
 
+  def test_restore_recursive_on_polymorphic_has_one_association
+    parent = ParentModel.create
+    polymorphic = PolymorphicModel.create(parent: parent)
+
+    parent.destroy
+
+    assert_equal 0, polymorphic.class.count
+
+    parent.restore(recursive: true)
+
+    assert_equal 1, polymorphic.class.count
+  end
+
+  # Ensure that we're checking parent_type when restoring
+  def test_missing_restore_recursive_on_polymorphic_has_one_association
+    parent = ParentModel.create
+    polymorphic = PolymorphicModel.create(parent_id: parent.id, parent_type: 'ParanoidModel')
+
+    parent.destroy
+    polymorphic.destroy
+
+    assert_equal 0, polymorphic.class.count
+
+    parent.restore(recursive: true)
+
+    assert_equal 0, polymorphic.class.count
+  end
+
+  def test_counter_cache_column_update_on_destroy#_and_restore_and_really_destroy
+    parent_model_with_counter_cache_column = ParentModelWithCounterCacheColumn.create
+    related_model = parent_model_with_counter_cache_column.related_models.create
+
+    assert_equal 1, parent_model_with_counter_cache_column.reload.related_models_count
+    related_model.destroy
+    assert_equal 0, parent_model_with_counter_cache_column.reload.related_models_count
+  end
+
+  def test_callbacks_for_counter_cache_column_update_on_destroy
+    parent_model_with_counter_cache_column = ParentModelWithCounterCacheColumn.create
+    related_model = parent_model_with_counter_cache_column.related_models.create
+
+    assert_equal nil, related_model.instance_variable_get(:@after_destroy_callback_called)
+    assert_equal nil, related_model.instance_variable_get(:@after_commit_on_destroy_callback_called)
+
+    related_model.destroy
+
+    assert related_model.instance_variable_get(:@after_destroy_callback_called)
+    # assert related_model.instance_variable_get(:@after_commit_on_destroy_callback_called)
+  end
+
+  def test_uniqueness_for_unparanoid_associated
+    parent_model = ParanoidWithUnparanoids.create
+    related = parent_model.unparanoid_unique_models.create
+    # will raise exception if model is not checked for paranoia
+    related.valid?
+  end
+
+  # TODO: find a fix for Rails 4.1
+  if ActiveRecord::VERSION::STRING !~ /\A4\.1/
+    def test_counter_cache_column_update_on_really_destroy
+      parent_model_with_counter_cache_column = ParentModelWithCounterCacheColumn.create
+      related_model = parent_model_with_counter_cache_column.related_models.create
+
+      assert_equal 1, parent_model_with_counter_cache_column.reload.related_models_count
+      related_model.really_destroy!
+      assert_equal 0, parent_model_with_counter_cache_column.reload.related_models_count
+    end
+  end
+
+  # TODO: find a fix for Rails 4.0 and 4.1
+  if ActiveRecord::VERSION::STRING >= '4.2'
+    def test_callbacks_for_counter_cache_column_update_on_really_destroy!
+      parent_model_with_counter_cache_column = ParentModelWithCounterCacheColumn.create
+      related_model = parent_model_with_counter_cache_column.related_models.create
+
+      assert_equal nil, related_model.instance_variable_get(:@after_destroy_callback_called)
+      assert_equal nil, related_model.instance_variable_get(:@after_commit_on_destroy_callback_called)
+
+      related_model.really_destroy!
+
+      assert related_model.instance_variable_get(:@after_destroy_callback_called)
+      assert related_model.instance_variable_get(:@after_commit_on_destroy_callback_called)
+    end
+  end
+
   private
   def get_featureful_model
     FeaturefulModel.new(:name => "not empty")
@@ -665,6 +932,16 @@ end
 class ParanoidModel < ActiveRecord::Base
   belongs_to :parent_model
   acts_as_paranoid
+end
+
+class ParanoidWithUnparanoids < ActiveRecord::Base
+  self.table_name = 'plain_models'
+  has_many :unparanoid_unique_models
+end
+
+class UnparanoidUniqueModel < ActiveRecord::Base
+  belongs_to :paranoid_with_unparanoids
+  validates :name, :uniqueness => true
 end
 
 class FailCallbackModel < ActiveRecord::Base
@@ -679,20 +956,25 @@ class FeaturefulModel < ActiveRecord::Base
   validates :name, :presence => true, :uniqueness => true
 end
 
+class NonParanoidChildModel < ActiveRecord::Base
+  validates :name, :presence => true, :uniqueness => true
+end
+
 class PlainModel < ActiveRecord::Base
 end
 
 class CallbackModel < ActiveRecord::Base
   acts_as_paranoid
-  before_destroy {|model| model.instance_variable_set :@destroy_callback_called, true }
-  before_restore {|model| model.instance_variable_set :@restore_callback_called, true }
-  before_update  {|model| model.instance_variable_set :@update_callback_called, true }
-  before_save    {|model| model.instance_variable_set :@save_callback_called, true}
+  before_destroy      { |model| model.instance_variable_set :@destroy_callback_called, true }
+  before_restore      { |model| model.instance_variable_set :@restore_callback_called, true }
+  before_update       { |model| model.instance_variable_set :@update_callback_called, true }
+  before_save         { |model| model.instance_variable_set :@save_callback_called, true}
+  before_real_destroy { |model| model.instance_variable_set :@real_destroy_callback_called, true }
 
-  after_destroy  {|model| model.instance_variable_set :@after_destroy_callback_called, true }
-  after_commit   {|model| model.instance_variable_set :@after_commit_callback_called, true }
+  after_destroy       { |model| model.instance_variable_set :@after_destroy_callback_called, true }
+  after_commit        { |model| model.instance_variable_set :@after_commit_callback_called, true }
 
-  validate       {|model| model.instance_variable_set :@validate_called, true }
+  validate            { |model| model.instance_variable_set :@validate_called, true }
 
   def remove_called_variables
     instance_variables.each {|name| (name.to_s.end_with?('_called')) ? remove_instance_variable(name) : nil}
@@ -705,16 +987,37 @@ class ParentModel < ActiveRecord::Base
   has_many :related_models
   has_many :very_related_models, :class_name => 'RelatedModel', dependent: :destroy
   has_many :non_paranoid_models, dependent: :destroy
+  has_one :non_paranoid_model, dependent: :destroy
   has_many :asplode_models, dependent: :destroy
+  has_one :polymorphic_model, as: :parent, dependent: :destroy
+end
+
+class ParentModelWithCounterCacheColumn < ActiveRecord::Base
+  has_many :related_models
 end
 
 class RelatedModel < ActiveRecord::Base
   acts_as_paranoid
   belongs_to :parent_model
+  belongs_to :parent_model_with_counter_cache_column, counter_cache: true
+
+  after_destroy do |model|
+    if parent_model_with_counter_cache_column && parent_model_with_counter_cache_column.reload.related_models_count == 0
+      model.instance_variable_set :@after_destroy_callback_called, true
+    end
+  end
+  after_commit :set_after_commit_on_destroy_callback_called, on: :destroy
+
+  def set_after_commit_on_destroy_callback_called
+    if parent_model_with_counter_cache_column && parent_model_with_counter_cache_column.reload.related_models_count == 0
+      self.instance_variable_set :@after_commit_on_destroy_callback_called, true
+    end
+  end
 end
 
 class Employer < ActiveRecord::Base
   acts_as_paranoid
+  validates_uniqueness_of :name
   has_many :jobs
   has_many :employees, :through => :jobs
 end
@@ -739,6 +1042,43 @@ class CustomSentinelModel < ActiveRecord::Base
   acts_as_paranoid sentinel_value: DateTime.new(0)
 end
 
+class ActiveColumnModel < ActiveRecord::Base
+  acts_as_paranoid column: :active, sentinel_value: true
+
+  def paranoia_restore_attributes
+    {
+      deleted_at: nil,
+      active: true
+    }
+  end
+
+  def paranoia_destroy_attributes
+    {
+      deleted_at: current_time_from_proper_timezone,
+      active: nil
+    }
+  end
+end
+
+class ActiveColumnModelWithUniquenessValidation < ActiveRecord::Base
+  validates :name, :uniqueness => true
+  acts_as_paranoid column: :active, sentinel_value: true
+
+  def paranoia_restore_attributes
+    {
+      deleted_at: nil,
+      active: true
+    }
+  end
+
+  def paranoia_destroy_attributes
+    {
+      deleted_at: current_time_from_proper_timezone,
+      active: nil
+    }
+  end
+end
+
 class NonParanoidModel < ActiveRecord::Base
 end
 
@@ -761,6 +1101,24 @@ class ParanoidModelWithHasOne < ParanoidModel
   has_one :paranoid_model_with_belong, :dependent => :destroy
   has_one :class_name_belong, :dependent => :destroy, :class_name => "ParanoidModelWithAnthorClassNameBelong"
   has_one :paranoid_model_with_foreign_key_belong, :dependent => :destroy, :foreign_key => "has_one_foreign_key_id"
+  has_one :not_paranoid_model_with_belong, :dependent => :destroy
+end
+
+class ParanoidModelWithHasOneAndBuild < ActiveRecord::Base
+  has_one :paranoid_model_with_build_belong, :dependent => :destroy
+  validates :color, :presence => true
+  after_validation :build_paranoid_model_with_build_belong, on: :create
+
+  private
+  def build_paranoid_model_with_build_belong
+    super.tap { |child| child.name = "foo" }
+  end
+end
+
+class ParanoidModelWithBuildBelong < ActiveRecord::Base
+  acts_as_paranoid
+  validates :name, :presence => true
+  belongs_to :paranoid_model_with_has_one_and_build
 end
 
 class ParanoidModelWithBelong < ActiveRecord::Base
@@ -775,6 +1133,15 @@ end
 
 class ParanoidModelWithForeignKeyBelong < ActiveRecord::Base
   acts_as_paranoid
+  belongs_to :paranoid_model_with_has_one
+end
+
+class ParanoidModelWithTimestamp < ActiveRecord::Base
+  belongs_to :parent_model
+  acts_as_paranoid
+end
+
+class NotParanoidModelWithBelong < ActiveRecord::Base
   belongs_to :paranoid_model_with_has_one
 end
 
@@ -794,4 +1161,25 @@ class AsplodeModel < ActiveRecord::Base
 end
 
 class NoConnectionModel < ActiveRecord::Base
+end
+
+class PolymorphicModel < ActiveRecord::Base
+  acts_as_paranoid
+  belongs_to :parent, polymorphic: true
+end
+
+module Namespaced
+  def self.table_name_prefix
+    "namespaced_"
+  end
+
+  class ParanoidHasOne < ActiveRecord::Base
+    acts_as_paranoid
+    has_one :paranoid_belongs_to, dependent: :destroy
+  end
+
+  class ParanoidBelongsTo < ActiveRecord::Base
+    acts_as_paranoid
+    belongs_to :paranoid_has_one
+  end
 end
