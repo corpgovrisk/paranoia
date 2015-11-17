@@ -104,23 +104,21 @@ module Paranoia
   def restore!(opts = {})
     self.class.transaction do
       run_callbacks(:restore) do
-        # Fixes a bug where the build would error because attributes were frozen.
-        # This only happened on Rails versions earlier than 4.1.
-        noop_if_frozen = ActiveRecord.version < Gem::Version.new("4.1")
-
-        noop_if_frozen = ActiveRecord.version < Gem::Version.new("4.1")
-        if (noop_if_frozen && !@attributes.frozen?) || !noop_if_frozen
-          update_attribute paranoia_column, paranoia_sentinel_value
-          update_columns(paranoia_restore_attributes)
-          touch
-        end
-
         if opts[:recursive]
           if opts.has_key?(:restore_all) && opts[:restore_all].eql?(false)
             restore_associated_records(self.send(paranoia_column))
           else
             restore_associated_records
           end
+        end
+
+        # Fixes a bug where the build would error because attributes were frozen.
+        # This only happened on Rails versions earlier than 4.1.
+        noop_if_frozen = ActiveRecord.version < Gem::Version.new("4.1")
+        if (noop_if_frozen && !@attributes.frozen?) || !noop_if_frozen
+          update_attribute paranoia_column, paranoia_sentinel_value
+          update_columns(paranoia_restore_attributes)
+          touch
         end
 
       end
